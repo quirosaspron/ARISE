@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import URDFLoader from './vendor/urdf/URDFLoader.js';
-import { ColladaLoader } from './vendor/three/loaders/ColladaLoader.js';
+import { loadPackedModels } from './packed-model.js';
 import { t, initLanguage } from './i18n.js';
 
 initLanguage();
@@ -19,6 +19,8 @@ const stage=document.querySelector('.robot-stage');
 const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
 const smooth=v=>{v=clamp(v);return v*v*(3-2*v);};
 let active=0, navigationSequence=0;
+let measuredWindowWidth=innerWidth, mobileViewportHeight=0, lastLayoutMobile=innerWidth<=700;
+let layoutRevision=0, ignoredViewportResizes=0;
 
 function updateUI(index,fraction){
   active=index;
@@ -30,14 +32,37 @@ function updateUI(index,fraction){
   document.querySelector('#next').disabled=index===panels.length-1;
 }
 
-function measure(){
+function measure(resetViewport=false){
+  const mobile=innerWidth<=700;
+  const root=document.documentElement;
+  if(mobile){
+    if(resetViewport===true||!mobileViewportHeight){
+      root.style.removeProperty('--mobile-viewport-height');
+      mobileViewportHeight=viewport.clientHeight;
+      root.style.setProperty('--mobile-viewport-height',mobileViewportHeight+'px');
+    }
+    root.toggleAttribute('data-short-screen',mobileViewportHeight<=730);
+    root.toggleAttribute('data-compact-screen',mobileViewportHeight<=600);
+  }else{
+    mobileViewportHeight=0;
+    root.style.removeProperty('--mobile-viewport-height');
+    root.removeAttribute('data-short-screen');root.removeAttribute('data-compact-screen');
+  }
+  measuredWindowWidth=innerWidth;lastLayoutMobile=mobile;
+  stage.dataset.layoutRevision=String(++layoutRevision);
   if(!reading) journey.style.height=((innerWidth<=700?viewport.clientHeight:innerHeight)+viewport.clientWidth*(panels.length-1))+'px';
   if(innerWidth<=700){
     const top=viewport.getBoundingClientRect().top;
     const contentBottom=Math.max(...panels.map(panel=>panel.querySelector('.copy').getBoundingClientRect().bottom-top));
     stage.style.setProperty('--mobile-stage-top',Math.ceil(contentBottom+12)+'px');
   }else stage.style.removeProperty('--mobile-stage-top');
-  if(renderer){renderer.setPixelRatio(Math.min(devicePixelRatio,innerWidth<=700?1.25:1.6));renderer.setSize(stage.clientWidth,Math.max(1,stage.clientHeight));}
+  if(renderer){
+    const ratio=mobile?Math.min(Math.max(devicePixelRatio,2),2.5):Math.min(devicePixelRatio,1.6);
+    if(renderer.getPixelRatio()!==ratio)renderer.setPixelRatio(ratio);
+    const width=stage.clientWidth,height=Math.max(1,stage.clientHeight);
+    if(renderer.domElement.width!==Math.floor(width*ratio)||renderer.domElement.height!==Math.floor(height*ratio))renderer.setSize(width,height,false);
+    stage.dataset.pixelRatio=String(ratio);
+  }
   readScroll();
 }
 function readScroll(){
@@ -88,7 +113,15 @@ addEventListener('keydown',e=>{
 });
 // Native vertical scrolling remains intact, including touch, keyboard and scrollbar.
 addEventListener('scroll',readScroll,{passive:true});
-addEventListener('resize',()=>{ const position=current; measure(); if(!reading){current=target=position;window.scrollTo({top:position*viewport.clientWidth,behavior:'auto'});requestFrame();} });
+addEventListener('resize',()=>{
+  // Safari's toolbar changes the visible height during scroll. Keep the mobile
+  // composition and scroll position stable; only reflow when the width changes.
+  if(innerWidth<=700&&lastLayoutMobile&&innerWidth===measuredWindowWidth){
+    stage.dataset.ignoredViewportResizes=String(++ignoredViewportResizes);return;
+  }
+  const position=current;measure(true);
+  if(!reading){current=target=position;window.scrollTo({top:position*viewport.clientWidth,behavior:'auto'});requestFrame();}
+});
 function syncMotionLabels(){
   motionButton.textContent=t(reading?'motion.off':'motion.on');
   motionButton.title=t(reading?'motion.start':'motion.stop');
@@ -114,6 +147,7 @@ function modelMessage(key){
 
 async function loadScene(){
  const status=document.querySelector('.loading');
+ const loadStarted=performance.now();
  try{
   THREE.Object3D.DEFAULT_UP.set(0,0,1);
   scene=new THREE.Scene();
@@ -132,14 +166,22 @@ async function loadScene(){
   const manager=new THREE.LoadingManager();
   let failed=false;
   manager.onError=url=>{failed=true;stage.dataset.modelState='error';status.hidden=false;modelMessage('model.error');console.error('ARISE asset:',url);};
-  manager.onLoad=()=>{if(!robot||failed)return;robot.visible=true;shadow.visible=true;status.hidden=true;stage.dataset.modelState='ready';measure();requestFrame();};
+  manager.onLoad=()=>{if(!robot||failed)return;robot.visible=true;shadow.visible=true;status.hidden=true;stage.dataset.modelState='ready';stage.dataset.modelLoadMs=String(Math.round(performance.now()-loadStarted));measure();requestFrame();};
   const loader=new URDFLoader(manager);
   loader.packages={go2_description:new URL('./assets/go2_description/',import.meta.url).href};
-  // Use the original Collada/URDF transform handling. Share geometry between legs.
-  const meshes=new Map();
+  // Same URDF joints and original Collada transforms, pre-parsed into one pack.
+  // Geometry and materials remain shared between copies of each leg.
+  const meshes=loadPackedModels();
+  meshes.catch(()=>{});
+  let meshTicket=0;
   loader.loadMeshCb=(url,manager,done)=>{
-   if(!meshes.has(url))meshes.set(url,new Promise((resolve,reject)=>new ColladaLoader(manager).load(url,result=>resolve(result.scene),undefined,reject)));
-   meshes.get(url).then(model=>done(model.clone(true)),error=>done(null,error));
+   const ticket='packed-mesh-'+(++meshTicket);
+   manager.itemStart(ticket);
+   meshes.then(models=>{
+     const model=models.get(url.split('/').pop());
+     if(!model)throw new Error('Missing robot part: '+url);
+     done(model.clone(true));
+   }).catch(error=>{manager.itemError(ticket);done(null,error);}).finally(()=>manager.itemEnd(ticket));
   };
   loader.load('./assets/go2_description/urdf/go2_description.urdf',model=>{
    robot=model;robot.visible=false;scene.add(robot);pose(0,.016);
@@ -154,18 +196,17 @@ function pose(delta,dt){
  const mobile=innerWidth<=700;
  const turn=smooth(current/.7);
  const stageHeight=Math.max(1,stage.clientHeight);
- // A wider mobile camera span makes the robot about 15% smaller.
- const span=mobile?Math.max(.92,stageHeight/225*.92):1.12;
+ const span=mobile?Math.max(.44+.04*turn,stageHeight/255*(.60+.18*turn)):1.12;
  const width=stage.clientWidth;
  camera.left=-span*width/stageHeight/2;camera.right=-camera.left;camera.top=span/2;camera.bottom=-span/2;camera.updateProjectionMatrix();
  const centerX=mobile?.5:.73;
- const centerY=mobile?.5:.55;
+ const centerY=mobile?(stageHeight<180?.54:.58):.55;
  robot.position.set((centerX-.5)*(camera.right-camera.left),0,.32+(.5-centerY)*span);
  robot.rotation.set(0,0,-Math.PI/2*(1-turn));
  const speed=Math.min(1,Math.abs(delta)*95);
  velocity+=(speed-velocity)*Math.min(1,dt*12);
  motion=velocity*turn;
- travel=current*22;
+ travel=current*15;
  for(const [leg,offset] of [['FL',0],['RR',0],['FR',Math.PI],['RL',Math.PI]]){
   const phase=travel+offset;
   const x=.065*Math.cos(phase)*motion;

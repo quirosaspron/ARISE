@@ -10,7 +10,16 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=7">
+  <link rel="stylesheet" href="./style.css?v=8">
+  <link rel="modulepreload" href="./vendor/three/three.module.js">
+  <link rel="preload" href="./assets/go2-fast/meshpack.json" as="fetch" crossorigin>
+  <script>
+    // Start the largest model request while the page and renderer are loading.
+    const robotPreload=document.createElement('link');
+    robotPreload.rel='preload';robotPreload.as='fetch';robotPreload.crossOrigin='anonymous';
+    robotPreload.href='./assets/go2-fast/meshpack.bin'+(typeof DecompressionStream==='function'?'.gz':'');
+    document.head.append(robotPreload);
+  </script>
   <script type="importmap">{"imports":{"three":"./vendor/three/three.module.js","three/examples/jsm/":"./vendor/three/"}}</script>
 </head>
 <body>
@@ -126,6 +135,6 @@
   <button id="motion-toggle" aria-pressed="false">Movimiento: sí</button>
 </footer>
 <noscript><style>.viewport{position:relative;height:auto}.content-window{position:relative;clip-path:none}.track{display:block}.panel{height:auto;min-height:70vh;padding-bottom:60px}.robot-stage,.bottom-bar,.language-switch{display:none}#journey{height:auto}</style></noscript>
-<script type="module" src="./app.js?v=6"></script>
+<script type="module" src="./app.js?v=7"></script>
 </body>
 </html>
